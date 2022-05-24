@@ -253,8 +253,6 @@ class FeaturePyramidNet(nn.Module):
 
 
 class DoubleConv(nn.Module):
-    """(convolution => [BN] => ReLU) * 2"""
-
     def __init__(self, in_channels, out_channels, mid_channels=None):
         super().__init__()
         if not mid_channels:
@@ -281,10 +279,19 @@ def average_norm(t):
 
 
 def tensor_correlation(a, b):
-    return torch.einsum("nchw,ncij->nhwij", a, b)
+    return torch.einsum("nchw,ncij->nhwij", a, b)   # [batch_size, height, width, height', width']
 
 
 def sample(t: torch.Tensor, coords: torch.Tensor):
+    """samples pixels from features
+
+    Args:
+        t (torch.Tensor): feature tensor, shaped [batch_size, channels, height, width]
+        coords (torch.Tensor): normalized pixel locations, shaped [batch_size, height_out, width_out, 2]
+
+    Returns:
+        torch.Tensor: the sampled feature tensor
+    """
     return F.grid_sample(t, coords.permute(0, 2, 1, 3), padding_mode='border', align_corners=True)
 
 
@@ -324,9 +331,9 @@ class ContrastiveCorrelationLoss(nn.Module):
 
     def helper(self, f1, f2, c1, c2, shift):
         with torch.no_grad():
-            # Comes straight from backbone which is currently frozen. this saves mem.
-            fd = tensor_correlation(norm(f1), norm(f2))
-
+            fd = tensor_correlation(norm(f1), norm(f2))     # [batch_size, height, width, height, width]
+            
+            # pointwise ???
             if self.cfg.pointwise:
                 old_mean = fd.mean()
                 fd -= fd.mean([3, 4], keepdim=True)
@@ -340,7 +347,7 @@ class ContrastiveCorrelationLoss(nn.Module):
             min_val = -9999.0
 
         if self.cfg.stabalize:
-            loss = - cd.clamp(min_val, .8) * (fd - shift)
+            loss = - cd.clamp(min_val, .8) * (fd - shift)   # loss function
         else:
             loss = - cd.clamp(min_val) * (fd - shift)
 
@@ -352,8 +359,10 @@ class ContrastiveCorrelationLoss(nn.Module):
                 orig_code: torch.Tensor, orig_code_pos: torch.Tensor,
                 ):
 
+        # [batch_size, feature_samples, feature_samples, 2]
         coord_shape = [orig_feats.shape[0], self.cfg.feature_samples, self.cfg.feature_samples, 2]
 
+        # default is False
         if self.cfg.use_salience:
             coords1_nonzero = sample_nonzero_locations(orig_salience, coord_shape)
             coords2_nonzero = sample_nonzero_locations(orig_salience_pos, coord_shape)
@@ -435,18 +444,22 @@ class NetWithActivations(torch.nn.Module):
 
 
 class ContrastiveCRFLoss(nn.Module):
+    # conditional random field loss
 
     def __init__(self, n_samples, alpha, beta, gamma, w1, w2, shift):
         super(ContrastiveCRFLoss, self).__init__()
-        self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
-        self.w1 = w1
-        self.w2 = w2
-        self.n_samples = n_samples
-        self.shift = shift
+        self.alpha = alpha          # default = .5
+        self.beta = beta            # default = .15
+        self.gamma = gamma          # default = .05
+        self.w1 = w1                # default = 10
+        self.w2 = w2                # default = 3
+        self.n_samples = n_samples  # default = 1000, number of pixels to sample from image
+        self.shift = shift          # default = 0, constant shift
 
     def forward(self, guidance, clusters):
+        # guidance = feature map, shaped [batch, channels, height, width]
+        # clusters = segmentation map
+
         device = clusters.device
         assert (guidance.shape[0] == clusters.shape[0])
         assert (guidance.shape[2:] == clusters.shape[2:])
@@ -461,9 +474,10 @@ class ContrastiveCRFLoss(nn.Module):
         coord_diff = (coords.unsqueeze(-1) - coords.unsqueeze(1)).square().sum(0).unsqueeze(0)
         guidance_diff = (selected_guidance.unsqueeze(-1) - selected_guidance.unsqueeze(2)).square().sum(1)
 
+        # loss function, shaped [batch_size, num_samples, num_samples]
         sim_kernel = self.w1 * torch.exp(- coord_diff / (2 * self.alpha) - guidance_diff / (2 * self.beta)) + \
                      self.w2 * torch.exp(- coord_diff / (2 * self.gamma)) - self.shift
 
         selected_clusters = clusters[:, :, coords[0, :], coords[1, :]]
-        cluster_sims = torch.einsum("nka,nkb->nab", selected_clusters, selected_clusters)
+        cluster_sims = torch.einsum("nka,nkb->nab", selected_clusters, selected_clusters)  # [batch_size, num_samples, num_samples]
         return -(cluster_sims * sim_kernel)

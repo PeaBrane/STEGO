@@ -132,7 +132,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             feats_pos, code_pos = self.net(img_pos)
         log_args = dict(sync_dist=False, rank_zero_only=True)
 
-        if self.cfg.use_true_labels:
+        if self.cfg.use_true_labels:  # default = False
             signal = one_hot_feats(label + 1, self.n_classes + 1)
             signal_pos = one_hot_feats(label_pos + 1, self.n_classes + 1)
         else:
@@ -144,7 +144,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         should_log_hist = (self.cfg.hist_freq is not None) and \
                           (self.global_step % self.cfg.hist_freq == 0) and \
                           (self.global_step > 0)
-        if self.cfg.use_salience:
+        if self.cfg.use_salience:  # default = False
             salience = batch["mask"].to(torch.float32).squeeze(1)
             salience_pos = batch["mask_pos"].to(torch.float32).squeeze(1)
         else:
@@ -180,7 +180,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
                      self.cfg.pos_intra_weight * pos_intra_loss +
                      self.cfg.neg_inter_weight * neg_inter_loss) * self.cfg.correspondence_weight
 
-        if self.cfg.rec_weight > 0:
+        if self.cfg.rec_weight > 0:  # default = 0
             rec_feats = self.decoder(code)
             rec_loss = -(norm(rec_feats) * norm(feats)).sum(1).mean()
             self.log('loss/rec', rec_loss, **log_args)
