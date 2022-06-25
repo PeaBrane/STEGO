@@ -137,13 +137,22 @@ class ClusterLookup(nn.Module):
         super(ClusterLookup, self).__init__()
         self.n_classes = n_classes
         self.dim = dim
-        self.clusters = torch.nn.Parameter(torch.randn(n_classes, dim))
+        self.clusters = torch.nn.Parameter(torch.randn(n_classes, dim))  # trainable cluster features
 
     def reset_parameters(self):
         with torch.no_grad():
             self.clusters.copy_(torch.randn(self.n_classes, self.dim))
 
     def forward(self, x, alpha, log_probs=False):
+        """Computes the inner products (over channels) between input features and trainable cluster features.
+            And feeds it to an entropy loss function.
+
+        Args:
+            x: the input cluster features, shaped [batchsize, channels, height, width]
+            alpha (_type_): _description_
+            log_probs (bool, optional): _description_. Defaults to False.
+        """
+
         normed_clusters = F.normalize(self.clusters, dim=1)
         normed_features = F.normalize(x, dim=1)
         inner_products = torch.einsum("bchw,nc->bnhw", normed_features, normed_clusters)
@@ -152,7 +161,7 @@ class ClusterLookup(nn.Module):
             cluster_probs = F.one_hot(torch.argmax(inner_products, dim=1), self.clusters.shape[0]) \
                 .permute(0, 3, 1, 2).to(torch.float32)
         else:
-            cluster_probs = nn.functional.softmax(inner_products * alpha, dim=1)
+            cluster_probs = nn.functional.softmax(inner_products * alpha, dim=1)  # probabilities
 
         cluster_loss = -(cluster_probs * inner_products).sum(1).mean()
         if log_probs:
@@ -253,6 +262,8 @@ class FeaturePyramidNet(nn.Module):
 
 
 class DoubleConv(nn.Module):
+    """Two convolution layers with BatchNorm + ReLU
+    """
     def __init__(self, in_channels, out_channels, mid_channels=None):
         super().__init__()
         if not mid_channels:
@@ -297,28 +308,48 @@ def sample(t: torch.Tensor, coords: torch.Tensor):
 
 @torch.jit.script
 def super_perm(size: int, device: torch.device):
+    """random derangement
+    """
     perm = torch.randperm(size, device=device, dtype=torch.long)
     perm[perm == torch.arange(size, device=device)] += 1
     return perm % size
 
 
 def sample_nonzero_locations(t, target_size):
-    nonzeros = torch.nonzero(t)
+    """return coordinates of randomly sampled nonzero pixels
+
+    NOTE: the dimensions specified by target_size is unnecessary
+
+    Args:
+        t: a feature map, shaped [channels, width, height]
+        target_size: size of the sampled feature map, (channels, sampled_width, sampled_height)
+
+    Returns:
+        _type_: sampled coordinates, normalized and centered, shaped [channels, sampled_width, sampled_height, 2]
+    """
+
+    nonzeros = torch.nonzero(t)  # indices of nonzero values
     coords = torch.zeros(target_size, dtype=nonzeros.dtype, device=nonzeros.device)
     n = target_size[1] * target_size[2]
-    for i in range(t.shape[0]):
+
+    for i in range(t.shape[0]):  # iterate over channels
         selected_nonzeros = nonzeros[nonzeros[:, 0] == i]
         if selected_nonzeros.shape[0] == 0:
             selected_coords = torch.randint(t.shape[1], size=(n, 2), device=nonzeros.device)
         else:
             selected_coords = selected_nonzeros[torch.randint(len(selected_nonzeros), size=(n,)), 1:]
         coords[i, :, :, :] = selected_coords.reshape(target_size[1], target_size[2], 2)
+
+    # normalize and center coordinates
     coords = coords.to(torch.float32) / t.shape[1]
     coords = coords * 2 - 1
     return torch.flip(coords, dims=[-1])
 
 
 class ContrastiveCorrelationLoss(nn.Module):
+    """The is the main (novel) loss function proposed in STEGO.
+    There are no trainable parameters.
+    """
 
     def __init__(self, cfg, ):
         super(ContrastiveCorrelationLoss, self).__init__()
@@ -359,10 +390,11 @@ class ContrastiveCorrelationLoss(nn.Module):
                 orig_code: torch.Tensor, orig_code_pos: torch.Tensor,
                 ):
 
-        # [batch_size, feature_samples, feature_samples, 2]
+        # [channels, feature_samples, feature_samples, 2]
+        # default feature_samples = 11
         coord_shape = [orig_feats.shape[0], self.cfg.feature_samples, self.cfg.feature_samples, 2]
 
-        # default is False
+        # whether to sample based on nonzero pixels of saliency map, default is False
         if self.cfg.use_salience:
             coords1_nonzero = sample_nonzero_locations(orig_salience, coord_shape)
             coords2_nonzero = sample_nonzero_locations(orig_salience_pos, coord_shape)
@@ -374,7 +406,8 @@ class ContrastiveCorrelationLoss(nn.Module):
         else:
             coords1 = torch.rand(coord_shape, device=orig_feats.device) * 2 - 1
             coords2 = torch.rand(coord_shape, device=orig_feats.device) * 2 - 1
-
+        
+        # random sample of feature
         feats = sample(orig_feats, coords1)
         code = sample(orig_code, coords1)
 
@@ -388,7 +421,7 @@ class ContrastiveCorrelationLoss(nn.Module):
 
         neg_losses = []
         neg_cds = []
-        for i in range(self.cfg.neg_samples):
+        for i in range(self.cfg.neg_samples):  # default is 5
             perm_neg = super_perm(orig_feats.shape[0], orig_feats.device)
             feats_neg = sample(orig_feats[perm_neg], coords2)
             code_neg = sample(orig_code[perm_neg], coords2)
@@ -444,7 +477,8 @@ class NetWithActivations(torch.nn.Module):
 
 
 class ContrastiveCRFLoss(nn.Module):
-    # conditional random field loss
+    """Contrastive Conditional Random Field Loss Function
+    """
 
     def __init__(self, n_samples, alpha, beta, gamma, w1, w2, shift):
         super(ContrastiveCRFLoss, self).__init__()

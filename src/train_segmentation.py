@@ -88,6 +88,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             "final/linear/", n_classes, 0, False)
 
         self.linear_probe_loss_fn = torch.nn.CrossEntropyLoss()
+        
         self.crf_loss_fn = ContrastiveCRFLoss(
             cfg.crf_samples, cfg.alpha, cfg.beta, cfg.gamma, cfg.w1, cfg.w2, cfg.shift)
 
@@ -110,8 +111,11 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         return self.net(x)[1]
 
     def training_step(self, batch, batch_idx):
-        # training_step defined the train loop.
-        # It is independent of forward
+        """the training loop
+        """
+
+        # separate optimizers for the segmentation head, linear probe, and cluster probe
+        # furthermore, the three are trained separately
         net_optim, linear_probe_optim, cluster_probe_optim = self.optimizers()
 
         net_optim.zero_grad()
@@ -127,8 +131,8 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             label = batch["label"]
             label_pos = batch["label_pos"]
 
-        feats, code = self.net(img)
-        if self.cfg.correspondence_weight > 0:
+        feats, code = self.net(img)  # feats is the input to the segmentation head, and code is the output
+        if self.cfg.correspondence_weight > 0:  # default = 1.0
             feats_pos, code_pos = self.net(img_pos)
         log_args = dict(sync_dist=False, rank_zero_only=True)
 
@@ -151,7 +155,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             salience = None
             salience_pos = None
 
-        if self.cfg.correspondence_weight > 0:
+        if self.cfg.correspondence_weight > 0:  # default = 1.0
             (
                 pos_intra_loss, pos_intra_cd,
                 pos_inter_loss, pos_inter_cd,
@@ -186,7 +190,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             self.log('loss/rec', rec_loss, **log_args)
             loss += self.cfg.rec_weight * rec_loss
 
-        if self.cfg.aug_alignment_weight > 0:
+        if self.cfg.aug_alignment_weight > 0:  # default = 0
             orig_feats_aug, orig_code_aug = self.net(img_aug)
             downsampled_coord_aug = resize(
                 coord_aug.permute(0, 3, 1, 2),
@@ -199,7 +203,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             self.log('loss/aug_alignment', aug_alignment, **log_args)
             loss += self.cfg.aug_alignment_weight * aug_alignment
 
-        if self.cfg.crf_weight > 0:
+        if self.cfg.crf_weight > 0:  # default = 0
             crf = self.crf_loss_fn(
                 resize(img, 56),
                 norm(resize(code, 56))
@@ -210,21 +214,23 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         flat_label = label.reshape(-1)
         mask = (flat_label >= 0) & (flat_label < self.n_classes)
 
-        detached_code = torch.clone(code.detach())
-
+        detached_code = torch.clone(code.detach())  # detach output from segmentation head
+        
+        # linear probe (a conv layer)
         linear_logits = self.linear_probe(detached_code)
         linear_logits = F.interpolate(linear_logits, label.shape[-2:], mode='bilinear', align_corners=False)
         linear_logits = linear_logits.permute(0, 2, 3, 1).reshape(-1, self.n_classes)
-        linear_loss = self.linear_probe_loss_fn(linear_logits[mask], flat_label[mask]).mean()
+        linear_loss = self.linear_probe_loss_fn(linear_logits[mask], flat_label[mask]).mean()  # cross-entropy loss
         loss += linear_loss
         self.log('loss/linear', linear_loss, **log_args)
 
+        # cluster probe
         cluster_loss, cluster_probs = self.cluster_probe(detached_code, None)
         loss += cluster_loss
         self.log('loss/cluster', cluster_loss, **log_args)
         self.log('loss/total', loss, **log_args)
 
-        self.manual_backward(loss)
+        self.manual_backward(loss)  # a pytorch-lightning method
         net_optim.step()
         cluster_probe_optim.step()
         linear_probe_optim.step()
