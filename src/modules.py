@@ -75,6 +75,8 @@ class DinoFeaturizer(nn.Module):
             torch.nn.Conv2d(in_channels, self.dim, (1, 1)))  # ,
 
     def make_nonlinear_clusterer(self, in_channels):
+        """Conv + ReLU + Conv
+        """
         return torch.nn.Sequential(
             torch.nn.Conv2d(in_channels, in_channels, (1, 1)),
             torch.nn.ReLU(),
@@ -107,7 +109,7 @@ class DinoFeaturizer(nn.Module):
 
         if self.proj_type is not None:
             code = self.cluster1(self.dropout(image_feat))
-            if self.proj_type == "nonlinear":
+            if self.proj_type == "nonlinear":  # default
                 code += self.cluster2(self.dropout(image_feat))
         else:
             code = image_feat
@@ -157,7 +159,7 @@ class ClusterLookup(nn.Module):
         normed_features = F.normalize(x, dim=1)
         inner_products = torch.einsum("bchw,nc->bnhw", normed_features, normed_clusters)
 
-        if alpha is None:
+        if alpha is None:  # default is None
             cluster_probs = F.one_hot(torch.argmax(inner_products, dim=1), self.clusters.shape[0]) \
                 .permute(0, 3, 1, 2).to(torch.float32)
         else:
@@ -290,6 +292,9 @@ def average_norm(t):
 
 
 def tensor_correlation(a, b):
+    """takes inner products over channels
+    """
+
     return torch.einsum("nchw,ncij->nhwij", a, b)   # [batch_size, height, width, height', width']
 
 
@@ -361,24 +366,37 @@ class ContrastiveCorrelationLoss(nn.Module):
         return t2
 
     def helper(self, f1, f2, c1, c2, shift):
+        """the contrastive loss function
+
+        Args:
+            f1 (torch.Tensor): the first set of feature maps, shaped [batch, channels, height, width]
+            shift (float): an offset (hyper-parameter)
+
+        Returns:
+            _type_: _description_
+        """
+
+        # norm means normalize over channels
+
         with torch.no_grad():
-            fd = tensor_correlation(norm(f1), norm(f2))     # [batch_size, height, width, height, width]
+            # inner product over channels
+            # shaped [batch, height, width, height, width]
+            fd = tensor_correlation(norm(f1), norm(f2))
             
-            # pointwise ???
-            if self.cfg.pointwise:
+            if self.cfg.pointwise:  # default = True
                 old_mean = fd.mean()
                 fd -= fd.mean([3, 4], keepdim=True)
-                fd = fd - fd.mean() + old_mean
+                fd = fd - fd.mean() + old_mean  # fd.mean() is just 0?
 
         cd = tensor_correlation(norm(c1), norm(c2))
 
-        if self.cfg.zero_clamp:
+        if self.cfg.zero_clamp:  # default = True
             min_val = 0.0
         else:
             min_val = -9999.0
 
-        if self.cfg.stabalize:
-            loss = - cd.clamp(min_val, .8) * (fd - shift)   # loss function
+        if self.cfg.stabalize:  # default = False
+            loss = - cd.clamp(min_val, .8) * (fd - shift)
         else:
             loss = - cd.clamp(min_val) * (fd - shift)
 

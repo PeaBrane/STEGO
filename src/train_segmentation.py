@@ -58,8 +58,8 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
 
         if not cfg.continuous:
             dim = n_classes
-        else:
-            dim = cfg.dim
+        else:  # default
+            dim = cfg.dim  # number of channels for codes, default = 70
 
         data_dir = join(cfg.output_root, "data")
         if cfg.arch == "feature-pyramid":
